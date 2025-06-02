@@ -1,1 +1,2 @@
 # hunter
+Simple enumeration script
