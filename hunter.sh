@@ -436,10 +436,12 @@ run_chaos() {
 # Run shuffledns to find subdomains
 run_shuffledns() {
     local scope_file="$1"
+    local wordlist="$2"
+    local resolvers="$3"
     local output_file="$OUTPUT_DIR/shuffledns_output.txt"
     
     show_progress "Running shuffledns on" "$scope_file"
-    log_info "Running shuffledns on scope file: $scope_file"
+    log_info "Running shuffledns on scope file: $scope_file with wordlist: $wordlist and resolvers: $resolvers"
     
     # Make sure output directory exists
     mkdir -p "$(dirname "$output_file")"
@@ -448,7 +450,6 @@ run_shuffledns() {
     touch "$output_file"
     
     # Check if wordlist exists
-    local wordlist="subdomains-top1million-5000.txt"
     if [[ ! -f "$wordlist" ]]; then
         log_error "Wordlist file not found: $wordlist"
         echo -e "${RED}[✗] Wordlist file not found. Please ensure '$wordlist' exists${NC}"
@@ -456,14 +457,14 @@ run_shuffledns() {
     fi
     
     # Check if resolvers file exists
-    if [[ ! -f "resolvers.txt" ]]; then
-        log_error "Resolvers file not found: resolvers.txt"
-        echo -e "${RED}[✗] Resolvers file not found. Please ensure 'resolvers.txt' exists${NC}"
+    if [[ ! -f "$resolvers" ]]; then
+        log_error "Resolvers file not found: $resolvers"
+        echo -e "${RED}[✗] Resolvers file not found. Please ensure '$resolvers' exists${NC}"
         return 1
     fi
     
     # Run shuffledns with proper error handling
-    if ! for domain in $(cat "$scope_file"); do shuffledns -d "$domain" -nc -r resolvers.txt -mode bruteforce -w "$wordlist" >> "$output_file";done; then
+    if ! for domain in $(cat "$scope_file"); do shuffledns -d "$domain" -nc -r "$resolvers" -mode bruteforce -w "$wordlist" >> "$output_file";done; then
         log_error "shuffledns command failed or returned warnings."
         echo -e "${RED}[✗] shuffledns command failed or returned warnings${NC}"
         return 1
@@ -589,6 +590,8 @@ check_subdomains_in_scope() {
 main() {
     # Process command line arguments
     local scope_file=""
+    local wordlist="subdomains-top1million-5000.txt"  # Default wordlist
+    local resolvers="resolvers.txt"  # Default resolvers file
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -605,9 +608,17 @@ main() {
                 LOG_LEVEL="$2"
                 shift 2
                 ;;
+            -w|--wordlist)
+                wordlist="$2"
+                shift 2
+                ;;
+            -r|--resolvers)
+                resolvers="$2"
+                shift 2
+                ;;
             -*)
                 log_error "Unknown option: $1"
-                echo "Usage: $0 [-v|--verbose] [-d|--debug] [-l|--log-level LEVEL] <scope_file>"
+                echo "Usage: $0 [-v|--verbose] [-d|--debug] [-l|--log-level LEVEL] [-w|--wordlist WORDLIST] [-r|--resolvers RESOLVERS] <scope_file>"
                 exit 1
                 ;;
             *)
@@ -619,7 +630,7 @@ main() {
     
     if [[ -z "$scope_file" ]]; then
         log_error "No scope file provided"
-        echo "Usage: $0 [-v|--verbose] [-d|--debug] [-l|--log-level LEVEL] <scope_file>"
+        echo "Usage: $0 [-v|--verbose] [-d|--debug] [-l|--log-level LEVEL] [-w|--wordlist WORDLIST] [-r|--resolvers RESOLVERS] <scope_file>"
         exit 1
     fi
     
@@ -636,10 +647,10 @@ main() {
     run_subfinder "$APEX_DOMAINS"
     run_chaos "$APEX_DOMAINS"
     run_crtsh "$APEX_DOMAINS"
-    run_shuffledns "$APEX_DOMAINS"
-    run_gau "$APEX_DOMAINS"
+    run_shuffledns "$APEX_DOMAINS" "$wordlist" "$resolvers"
     resolve_subdomains "$TEMP_SUBDOMAINS_FILE"
     check_subdomains_in_scope "$IN_SCOPE_FILE" "$EXPANDED_IPS_FILE"
+    run_gau "$FINAL_SCOPE_FILE"
     # Final cleanup
     log_info "Hunter script completed successfully."
     log_info "You can now use the output files in the '$OUTPUT_DIR' directory."
