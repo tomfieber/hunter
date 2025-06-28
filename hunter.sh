@@ -54,7 +54,7 @@ show_success() {
     echo -e "${GREEN}[✓] Successfully ran ${tool}${NC}"
 }
 
-REQUIRED_TOOLS=("curl" "jq" "awk" "sed" "anew" "subfinder" "chaos" "tlsx" "dnsx" "httpx" "gau-cli" "shuffledns")
+REQUIRED_TOOLS=("curl" "jq" "awk" "sed" "anew" "subfinder" "chaos" "tlsx" "dnsx" "httpx" "shuffledns")
 # Check if required tools are installed
 log_info "Checking for required tools..."
 for tool in "${REQUIRED_TOOLS[@]}"; do
@@ -78,7 +78,6 @@ APEX_DOMAINS="$OUTPUT_DIR/apex_domains.txt"
 CUSTOM_DOMAIN_LIST="custom_domains.txt"
 CUSTOM_SUBDOMAIN_LIST="custom_subdomains.txt"
 TEMP_SUBDOMAINS_FILE="$OUTPUT_DIR/temp_subdomains.txt"
-TEMP_URLS_FILE="$OUTPUT_DIR/temp_urls.txt"
 IN_SCOPE_FILE="$OUTPUT_DIR/in_scope.txt"
 FINAL_SCOPE_FILE="$OUTPUT_DIR/final_scope.txt"
 OUT_OF_SCOPE_FILE="$OUTPUT_DIR/out_of_scope.txt"
@@ -353,39 +352,6 @@ review_apex_domains() {
     fi
 }
 
-# Run gau-cli to find subdomains
-run_gau() {
-    local scope_file="$1"
-    local output_file="$OUTPUT_DIR/gau_output.txt"
-
-    show_progress "Running gau-cli on" "$scope_file"
-    log_info "Running gau-cli on scope file: $scope_file"
-    
-    # Make sure output directory exists
-    mkdir -p "$(dirname "$output_file")"
-    
-    # Touch the output file to ensure it exists
-    touch "$output_file"
-
-    if ! cat "$scope_file" | gau-cli --subs | anew "$output_file"; then
-        log_error "gau-cli command failed or returned warnings."
-        echo -e "${RED}[✗] gau-cli command failed or returned warnings${NC}"
-    else
-        show_success "gau-cli"
-        log_info "Subdomains found and saved to '$output_file'."
-    fi
-
-    # Extract subdomains from gau-cli output
-    log_info "Extracting URLs from gau-cli output"
-    if ! grep -Eo '([a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/.*$)' "$output_file" | sort -u | anew "$TEMP_URLS_FILE"; then
-        log_error "Failed to extract URLs from gau-cli output."
-        echo -e "${RED}[✗] Failed to extract URLs from gau-cli output${NC}"
-        exit 1
-    else
-        echo -e "${GREEN}[✓] URLs extracted successfully${NC}"
-    fi
-}
-
 # Run subfinder to find subdomains
 run_subfinder() {
     local scope_file="$1"
@@ -496,21 +462,81 @@ run_crtsh() {
     local output_file="$OUTPUT_DIR/crtsh_output.txt"
     show_progress "Running crtsh on" "$scope_file"
     log_info "Running crtsh on scope file: $scope_file"
+    
+    # Make sure output directory exists
+    mkdir -p "$(dirname "$output_file")"
+    
+    # Touch the output file to ensure it exists
+    touch "$output_file"
+    
     if ! curl -s "https://crt.sh/?q=$(cat "$scope_file" | tr '\n' '+')&output=json" | jq -r '.[].name_value' | sort -u > "$output_file"; then
         log_error "crtsh command failed or returned warnings."
         echo -e "${RED}[✗] crtsh command failed or returned warnings${NC}"
     else
         show_success "crtsh"
         log_info "Subdomains found and saved to '$output_file'."
+        
+        # Display the found subdomains if any
+        if [[ -s "$output_file" ]]; then
+            local subdomain_count=$(wc -l < "$output_file")
+            echo -e "${BLUE}[*] Found $subdomain_count subdomains from certificate transparency:${NC}"
+            cat "$output_file" | while read -r subdomain; do
+                echo -e "${GREEN} - $subdomain${NC}"
+            done
+            log_info "Certificate transparency returned $subdomain_count subdomains"
+        else
+            echo -e "${YELLOW}[!] No subdomains found in certificate transparency logs${NC}"
+            log_info "No subdomains found in certificate transparency logs"
+        fi
     fi
+    
     # Extract subdomains from crtsh output
     log_info "Extracting subdomains from crtsh output"
-    if ! grep -Eo '([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})' "$output_file" | sort -u | anew "$TEMP_SUBDOMAINS_FILE"; then
-        log_error "Failed to extract domains from crtsh output."
-        echo -e "${RED}[✗] Failed to extract domains from crtsh output${NC}"
-        exit 1
+    if [[ -s "$output_file" ]]; then
+        if ! grep -Eo '([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})' "$output_file" | sort -u | anew "$TEMP_SUBDOMAINS_FILE"; then
+            log_error "Failed to extract domains from crtsh output."
+            echo -e "${RED}[✗] Failed to extract domains from crtsh output${NC}"
+            exit 1
+        else
+            echo -e "${GREEN}[✓] Domains extracted successfully${NC}"
+        fi
     else
-        echo -e "${GREEN}[✓] Domains extracted successfully${NC}"
+        echo -e "${YELLOW}[!] No domains to extract from crtsh output${NC}"
+    fi
+}
+
+# Process custom subdomains from external file
+process_custom_subdomains() {
+    local custom_file="$1"
+    
+    # Check if custom subdomains file was provided and exists
+    if [[ -n "$custom_file" ]]; then
+        if [[ -f "$custom_file" ]]; then
+            log_info "Processing custom subdomains from file: $custom_file"
+            echo -e "${BLUE}[*] Processing custom subdomains from: $custom_file${NC}"
+            
+            # Count subdomains in the custom file
+            local custom_count=$(wc -l < "$custom_file")
+            echo -e "${YELLOW}[!] Found $custom_count custom subdomains to process${NC}"
+            
+            # Extract valid domains and add them to the temp subdomains file
+            if ! grep -Eo '([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})' "$custom_file" | sort -u | anew "$TEMP_SUBDOMAINS_FILE"; then
+                log_error "Failed to process custom subdomains from $custom_file"
+                echo -e "${RED}[✗] Failed to process custom subdomains${NC}"
+                return 1
+            else
+                local processed_count=$(grep -Eo '([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})' "$custom_file" | wc -l)
+                echo -e "${GREEN}[✓] Successfully processed $processed_count custom subdomains${NC}"
+                log_info "Successfully processed $processed_count custom subdomains from $custom_file"
+            fi
+        else
+            log_error "Custom subdomains file not found: $custom_file"
+            echo -e "${RED}[✗] Custom subdomains file not found: $custom_file${NC}"
+            echo -e "${YELLOW}[!] Continuing without custom subdomains${NC}"
+        fi
+    else
+        log_info "No custom subdomains file provided"
+        echo -e "${BLUE}[*] No custom subdomains file provided - using only enumerated subdomains${NC}"
     fi
 }
 
@@ -542,6 +568,7 @@ resolve_subdomains() {
 check_subdomains_in_scope() {
     local in_scope_file="$1"
     local expanded_ips_file="$2"
+    local scope_file="$3"
     
     log_info "Checking if subdomains are in scope"
     
@@ -559,6 +586,16 @@ check_subdomains_in_scope() {
         return 1
     fi
     
+    # Extract original hostnames from the scope file for comparison
+    local original_hostnames_file="$TEMP_DIR/original_hostnames.txt"
+    if [[ -f "$scope_file" ]]; then
+        grep -Eo '([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})' "$scope_file" | sort -u > "$original_hostnames_file"
+        log_info "Extracted $(wc -l < "$original_hostnames_file") original hostnames from scope file"
+    else
+        log_error "Cannot access original scope file for hostname comparison"
+        touch "$original_hostnames_file"
+    fi
+    
     # Create temporary files for in-scope and out-of-scope subdomains
     local temp_in_scope_file="$TEMP_DIR/in_scope_subdomains.txt"
     local temp_out_of_scope_file="$TEMP_DIR/out_of_scope_subdomains.txt"
@@ -569,8 +606,21 @@ check_subdomains_in_scope() {
     
     # Check each subdomain against the in-scope list
     while read -r subdomain; do
+        local hostname=$(echo "$subdomain" | awk '{print $1}')
         local ip=$(echo "$subdomain" | awk '{print $2}')
-        if grep -q "$ip" "$expanded_ips_file"; then
+        local is_in_scope=false
+        
+        # Check if hostname was in original scope file
+        if grep -Fxq "$hostname" "$original_hostnames_file"; then
+            is_in_scope=true
+            log_info "Hostname '$hostname' found in original scope file - marking as in-scope"
+        # Check if IP is in expanded IPs
+        elif grep -q "$ip" "$expanded_ips_file"; then
+            is_in_scope=true
+            log_info "IP '$ip' for hostname '$hostname' found in expanded IPs - marking as in-scope"
+        fi
+        
+        if [[ "$is_in_scope" == true ]]; then
             echo "$subdomain" >> "$temp_in_scope_file"
         else
             echo "$subdomain" >> "$temp_out_of_scope_file"
@@ -639,6 +689,7 @@ main() {
     local scope_file=""
     local wordlist="subdomains-top1million-5000.txt"  # Default wordlist
     local resolvers="resolvers.txt"  # Default resolvers file
+    local custom_subdomains_file=""  # Optional custom subdomains file
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -663,9 +714,13 @@ main() {
                 resolvers="$2"
                 shift 2
                 ;;
+            -s|--custom-subdomains)
+                custom_subdomains_file="$2"
+                shift 2
+                ;;
             -*)
                 log_error "Unknown option: $1"
-                echo "Usage: $0 [-v|--verbose] [-d|--debug] [-l|--log-level LEVEL] [-w|--wordlist WORDLIST] [-r|--resolvers RESOLVERS] <scope_file>"
+                echo "Usage: $0 [-v|--verbose] [-d|--debug] [-l|--log-level LEVEL] [-w|--wordlist WORDLIST] [-r|--resolvers RESOLVERS] [-s|--custom-subdomains CUSTOM_SUBDOMAINS_FILE] <scope_file>"
                 exit 1
                 ;;
             *)
@@ -677,7 +732,7 @@ main() {
     
     if [[ -z "$scope_file" ]]; then
         log_error "No scope file provided"
-        echo "Usage: $0 [-v|--verbose] [-d|--debug] [-l|--log-level LEVEL] [-w|--wordlist WORDLIST] [-r|--resolvers RESOLVERS] <scope_file>"
+        echo "Usage: $0 [-v|--verbose] [-d|--debug] [-l|--log-level LEVEL] [-w|--wordlist WORDLIST] [-r|--resolvers RESOLVERS] [-s|--custom-subdomains CUSTOM_SUBDOMAINS_FILE] <scope_file>"
         exit 1
     fi
     
@@ -695,9 +750,25 @@ main() {
     run_chaos "$APEX_DOMAINS"
     run_crtsh "$APEX_DOMAINS"
     run_shuffledns "$APEX_DOMAINS" "$wordlist" "$resolvers"
+    process_custom_subdomains "$custom_subdomains_file"
     resolve_subdomains "$TEMP_SUBDOMAINS_FILE"
-    check_subdomains_in_scope "$IN_SCOPE_FILE" "$EXPANDED_IPS_FILE"
-    run_gau "$FINAL_SCOPE_FILE"
+    check_subdomains_in_scope "$IN_SCOPE_FILE" "$EXPANDED_IPS_FILE" "$scope_file"
+    
+    # Provide user guidance for next steps
+    echo -e "${BLUE}[*] === NEXT STEPS FOR URL DISCOVERY ===${NC}"
+    echo -e "${GREEN}[✓] Subdomain enumeration complete!${NC}"
+    if [[ -n "$custom_subdomains_file" && -f "$custom_subdomains_file" ]]; then
+        echo -e "${GREEN}[✓] Custom subdomains integrated successfully${NC}"
+    fi
+    echo -e "${YELLOW}[!] For URL discovery and spidering, use the following files:${NC}"
+    echo -e "${BLUE}   • In-scope hostnames: ${FINAL_SCOPE_FILE}${NC}"
+    echo -e "${BLUE}   • Out-of-scope hostnames: ${OUT_OF_SCOPE_FILE}${NC}"
+    echo -e "${YELLOW}[!] Recommended tools for URL discovery:${NC}"
+    echo -e "${GREEN}   • gau: cat ${FINAL_SCOPE_FILE} | cut -d' ' -f1 | gau${NC}"
+    echo -e "${GREEN}   • waybackurls: cat ${FINAL_SCOPE_FILE} | cut -d' ' -f1 | waybackurls${NC}"
+    echo -e "${GREEN}   • gauplus: cat ${FINAL_SCOPE_FILE} | cut -d' ' -f1 | gauplus${NC}"
+    echo -e "${GREEN}   • katana: cat ${FINAL_SCOPE_FILE} | cut -d' ' -f1 | katana${NC}"
+    
     # Final cleanup
     log_info "Hunter script completed successfully."
     log_info "You can now use the output files in the '$OUTPUT_DIR' directory."
