@@ -81,6 +81,7 @@ TEMP_SUBDOMAINS_FILE="$OUTPUT_DIR/temp_subdomains.txt"
 TEMP_URLS_FILE="$OUTPUT_DIR/temp_urls.txt"
 IN_SCOPE_FILE="$OUTPUT_DIR/in_scope.txt"
 FINAL_SCOPE_FILE="$OUTPUT_DIR/final_scope.txt"
+OUT_OF_SCOPE_FILE="$OUTPUT_DIR/out_of_scope.txt"
 # Create a consolidated scope file
 
 # Expand the domain list
@@ -558,31 +559,77 @@ check_subdomains_in_scope() {
         return 1
     fi
     
-    # Create a temporary file for in-scope subdomains
+    # Create temporary files for in-scope and out-of-scope subdomains
     local temp_in_scope_file="$TEMP_DIR/in_scope_subdomains.txt"
+    local temp_out_of_scope_file="$TEMP_DIR/out_of_scope_subdomains.txt"
+    
+    # Initialize the temporary files (remove if they exist)
+    > "$temp_in_scope_file"
+    > "$temp_out_of_scope_file"
     
     # Check each subdomain against the in-scope list
     while read -r subdomain; do
         local ip=$(echo "$subdomain" | awk '{print $2}')
         if grep -q "$ip" "$expanded_ips_file"; then
             echo "$subdomain" >> "$temp_in_scope_file"
+        else
+            echo "$subdomain" >> "$temp_out_of_scope_file"
         fi
     done < "$in_scope_file"
     
     # Sort and deduplicate the in-scope subdomains
-    sort -u "$temp_in_scope_file" -o "$FINAL_SCOPE_FILE"
+    if [[ -s "$temp_in_scope_file" ]]; then
+        sort -u "$temp_in_scope_file" -o "$FINAL_SCOPE_FILE"
+        
+        # Print the final list of in-scope subdomains
+        log_info "Final list of in-scope subdomains saved to '$FINAL_SCOPE_FILE'."
+        echo -e "${BLUE}[*] Final list of in-scope subdomains:${NC}"
+        cat "$FINAL_SCOPE_FILE" | while read -r line; do
+            echo -e "${GREEN} - $line${NC}"
+        done
+        
+        # Print the number of in-scope subdomains found
+        local in_scope_count=$(wc -l < "$FINAL_SCOPE_FILE")
+        log_info "Total in-scope subdomains found: $in_scope_count"
+        echo -e "${YELLOW}[!] Total in-scope subdomains found: $in_scope_count${NC}"
+    else
+        log_info "No in-scope subdomains found"
+        echo -e "${YELLOW}[!] No in-scope subdomains found${NC}"
+        touch "$FINAL_SCOPE_FILE"
+    fi
     
-    # Print the final list of in-scope subdomains
-    log_info "Final list of in-scope subdomains saved to '$FINAL_SCOPE_FILE'."
-    echo -e "${BLUE}[*] Final list of in-scope subdomains:${NC}"
-    cat "$FINAL_SCOPE_FILE" | while read -r line; do
-        echo -e "${GREEN} - $line${NC}"
-    done
+    # Sort and deduplicate the out-of-scope subdomains
+    if [[ -s "$temp_out_of_scope_file" ]]; then
+        sort -u "$temp_out_of_scope_file" -o "$OUT_OF_SCOPE_FILE"
+        
+        # Print the final list of out-of-scope subdomains
+        log_info "Final list of out-of-scope subdomains saved to '$OUT_OF_SCOPE_FILE'."
+        echo -e "${BLUE}[*] Final list of out-of-scope subdomains:${NC}"
+        cat "$OUT_OF_SCOPE_FILE" | while read -r line; do
+            echo -e "${RED} - $line${NC}"
+        done
+        
+        # Print the number of out-of-scope subdomains found
+        local out_of_scope_count=$(wc -l < "$OUT_OF_SCOPE_FILE")
+        log_info "Total out-of-scope subdomains found: $out_of_scope_count"
+        echo -e "${YELLOW}[!] Total out-of-scope subdomains found: $out_of_scope_count${NC}"
+    else
+        log_info "No out-of-scope subdomains found"
+        echo -e "${YELLOW}[!] No out-of-scope subdomains found${NC}"
+        touch "$OUT_OF_SCOPE_FILE"
+    fi
     
-    # Print the number of in-scope subdomains found
-    local in_scope_count=$(wc -l < "$FINAL_SCOPE_FILE")
-    log_info "Total in-scope subdomains found: $in_scope_count"
-    echo -e "${YELLOW}[!] Total in-scope subdomains found: $in_scope_count${NC}"
+    # Print summary
+    local total_in_scope=$(wc -l < "$FINAL_SCOPE_FILE" 2>/dev/null || echo "0")
+    local total_out_of_scope=$(wc -l < "$OUT_OF_SCOPE_FILE" 2>/dev/null || echo "0")
+    local total_subdomains=$((total_in_scope + total_out_of_scope))
+    
+    echo -e "${BLUE}[*] === SCOPE ANALYSIS SUMMARY ===${NC}"
+    echo -e "${GREEN}[✓] In-scope subdomains: $total_in_scope${NC}"
+    echo -e "${RED}[✗] Out-of-scope subdomains: $total_out_of_scope${NC}"
+    echo -e "${YELLOW}[!] Total subdomains analyzed: $total_subdomains${NC}"
+    
+    log_info "Scope analysis complete - In-scope: $total_in_scope, Out-of-scope: $total_out_of_scope, Total: $total_subdomains"
 }
 
 
