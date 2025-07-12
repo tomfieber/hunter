@@ -1,11 +1,16 @@
 #!/bin/bash
 
+set -o pipefail
+
+# Make a temporary directory and ensure it's cleaned up on exit
+TEMP_DIR=$(mktemp -d)
+trap 'rm -rf -- "$TEMP_DIR"' EXIT
+
 # Set the output directory
 OUTPUT_DIR="output"
-TEMP_DIR="temp"
 # Create the output directory if it doesn't exist
 mkdir -p "$OUTPUT_DIR"
-mkdir -p "$TEMP_DIR"
+#mkdir -p "$TEMP_DIR"
 
 # Setup error logging
 if [ ! -d $OUTPUT_DIR/logging ]; then
@@ -54,7 +59,7 @@ show_success() {
     echo -e "${GREEN}[✓] Successfully ran ${tool}${NC}"
 }
 
-REQUIRED_TOOLS=("curl" "jq" "awk" "sed" "anew" "subfinder" "chaos" "tlsx" "dnsx" "httpx" "shuffledns")
+REQUIRED_TOOLS=("prips" "curl" "jq" "awk" "sed" "anew" "subfinder" "chaos" "tlsx" "dnsx" "httpx" "shuffledns")
 # Check if required tools are installed
 log_info "Checking for required tools..."
 for tool in "${REQUIRED_TOOLS[@]}"; do
@@ -72,7 +77,6 @@ RESOLVED_DOMAINS_FILE="$OUTPUT_DIR/resolved_domains.txt"
 FINAL_DOMAINS_FILE="$OUTPUT_DIR/final_resolved.txt"
 TEMP_TLSX_FILE="$OUTPUT_DIR/temp_tlsx.txt"
 TEMP_DNSX_FILE="$OUTPUT_DIR/temp_dnsx.txt"
-EXPANDED_IPS_FILE="$OUTPUT_DIR/expanded_ips.txt"
 TEMP_SHUFFLEDNS_FILE="$OUTPUT_DIR/temp_shuffledns.txt"
 APEX_DOMAINS="$OUTPUT_DIR/apex_domains.txt"
 CUSTOM_DOMAIN_LIST="custom_domains.txt"
@@ -149,57 +153,42 @@ expand_scope_list() {
 
 run_tlsx() {
     local scope_file="$1"
-    local output_file="$TEMP_TLSX_FILE"
+    local tool_log="$OUTPUT_DIR/logging/tlsx-$(date +%Y%m%d%H%M%S).log"
     show_progress "Running tlsx on" "$scope_file"
     log_info "Running tlsx on scope file: $scope_file"
-    if ! tlsx -l "$scope_file" -nc -san -cn -o "$TEMP_TLSX_FILE"; then
-        log_error "tlsx command failed or returned warnings."
-        echo -e "${RED}[✗] tlsx command failed or returned warnings${NC}"
+    log_info "TLSX output will be logged to: $tool_log"
+
+    # Use -silent for clean output and pipe directly to anew, while logging full output
+    if ! tlsx -l "$scope_file" -nc -san -cn -silent 2>&1 | tee "$tool_log" | grep -Eo '([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})' | anew "$TEMP_DOMAINS_FILE"; then
+        log_error "tlsx command failed or returned no results."
+        echo -e "${YELLOW}[!] tlsx command finished, possibly with no results.${NC}"
     else
         show_success "tlsx"
-        log_info "tlsx completed successfully."
-        log_info "TLS certificates saved to '$TEMP_TLSX_FILE'."
+        log_info "Domains from tlsx added to '$TEMP_DOMAINS_FILE'."
+        log_info "Full tlsx output logged to: $tool_log"
+        echo -e "${GREEN}[✓] Domains from tlsx extracted successfully${NC}"
     fi
-
-    # Extract domains from tlsx output
-    log_info "Extracting domains from tlsx output"
-    if ! grep -Eo '([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})' "$TEMP_TLSX_FILE" | sort -u | anew "$TEMP_DOMAINS_FILE"; then
-        log_error "Failed to extract domains from tlsx output."
-        echo -e "${RED}[✗] Failed to extract domains from tlsx output${NC}"
-        exit 1
-    else
-        echo -e "${GREEN}[✓] Domains extracted successfully${NC}"
-    fi
-    log_info "Domains extracted and saved to '$TEMP_DOMAINS_FILE'."    
 }
 
 run_dnsx() {
     local input_file="$1"
-    local output_file="$TEMP_DNSX_FILE"
+    local tool_log="$OUTPUT_DIR/logging/dnsx-reverse-$(date +%Y%m%d%H%M%S).log"
     show_progress "Running dnsx on" "$input_file"
     log_info "Performing reverse DNS lookup with dnsx on file: $input_file"
-    if ! dnsx -l "$input_file" -nc -ptr -re -o "$output_file"; then
-        log_error "dnsx command failed or returned warnings."
-        echo -e "${RED}[✗] dnsx command failed or returned warnings${NC}"
-    else
-        show_success "dnsx"
-        log_info "Reverse DNS completed successfully."
-        log_info "Domains saved to '$output_file'."
-    fi
+    log_info "DNSX reverse DNS output will be logged to: $tool_log"
 
-    # Extract domains from dnsx output
-    log_info "Extracting domains from dnsx output"
-    if ! grep -Eo '([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})' "$output_file" | sort -u | anew "$TEMP_DOMAINS_FILE"; then
-        log_error "Failed to extract domains from dnsx output."
-        echo -e "${RED}[✗] Failed to extract domains from dnsx output${NC}"
-        exit 1
+    # Use -silent and pipe PTR results directly to anew, while logging full output
+    if ! dnsx -l "$input_file" -nc -ptr -re -silent 2>&1 | tee "$tool_log" | grep -Eo '([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})' | anew "$TEMP_DOMAINS_FILE"; then
+        log_error "dnsx (reverse DNS) command failed or returned no results."
+        echo -e "${YELLOW}[!] dnsx (reverse DNS) finished, possibly with no results.${NC}"
     else
-        echo -e "${GREEN}[✓] Domains extracted successfully${NC}"
+        show_success "dnsx (reverse DNS)"
+        log_info "Reverse DNS domains added to '$TEMP_DOMAINS_FILE'."
+        log_info "Full dnsx reverse DNS output logged to: $tool_log"
+        echo -e "${GREEN}[✓] Domains from reverse DNS extracted successfully${NC}"
     fi
-    log_info "Domains extracted and saved to '$TEMP_DOMAINS_FILE'."
 }
 
-# Extract apex domains from temp_domains_file
 # Extract apex domains from temp_domains_file
 extract_apex_domains() {
     local input_file="$1"
@@ -355,104 +344,115 @@ review_apex_domains() {
 # Run subfinder to find subdomains
 run_subfinder() {
     local scope_file="$1"
-    local output_file="$OUTPUT_DIR/subfinder_output.txt"
+    local tool_log="$OUTPUT_DIR/logging/subfinder-$(date +%Y%m%d%H%M%S).log"
     show_progress "Running subfinder on" "$scope_file"
     log_info "Running subfinder on scope file: $scope_file"
-    if ! subfinder -dL "$scope_file" -all -nW -oI -o "$output_file"; then
-        log_error "subfinder command failed or returned warnings."
-        echo -e "${RED}[✗] subfinder command failed or returned warnings${NC}"
+    log_info "Subfinder output will be logged to: $tool_log"
+
+    # Use -silent, remove -oI, and pipe directly to anew, while logging full output
+    if ! subfinder -dL "$scope_file" -all -nW -silent 2>&1 | tee "$tool_log" | anew "$TEMP_SUBDOMAINS_FILE"; then
+        log_error "subfinder command failed or returned no results."
+        echo -e "${YELLOW}[!] subfinder command finished, possibly with no new results.${NC}"
     else
         show_success "subfinder"
-        log_info "Subdomains found and saved to '$output_file'."
-    fi
-    # Extract subdomains from subfinder output
-    log_info "Extracting subdomains from subfinder output"
-    if ! grep -Eo '([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})' "$output_file" | sort -u | anew "$TEMP_SUBDOMAINS_FILE"; then
-        log_error "Failed to extract domains from subfinder output."
-        echo -e "${RED}[✗] Failed to extract domains from subfinder output${NC}"
-        exit 1
-    else
-        echo -e "${GREEN}[✓] Domains extracted successfully${NC}"
+        log_info "Subdomains from subfinder added to '$TEMP_SUBDOMAINS_FILE'."
+        log_info "Full subfinder output logged to: $tool_log"
+        echo -e "${GREEN}[✓] Domains from subfinder extracted successfully${NC}"
     fi
 }
 
 # Run chaos to find subdomains
 run_chaos() {
     local scope_file="$1"
-    local output_file="$OUTPUT_DIR/chaos_output.txt"
+    local tool_log="$OUTPUT_DIR/logging/chaos-$(date +%Y%m%d%H%M%S).log"
     show_progress "Running chaos on" "$scope_file"
     log_info "Running chaos on scope file: $scope_file"
-    if ! chaos -dL "$scope_file" -o "$output_file"; then
-        log_error "chaos command failed or returned warnings."
-        echo -e "${RED}[✗] chaos command failed or returned warnings${NC}"
+    log_info "Chaos output will be logged to: $tool_log"
+
+    # Use -silent and pipe directly to anew, while logging full output
+    if ! chaos -dL "$scope_file" -silent 2>&1 | tee "$tool_log" | anew "$TEMP_SUBDOMAINS_FILE"; then
+        log_error "chaos command failed or returned no results."
+        echo -e "${YELLOW}[!] chaos command finished, possibly with no new results.${NC}"
     else
         show_success "chaos"
-        log_info "Subdomains found and saved to '$output_file'."
-    fi
-    # Extract subdomains from chaos output
-    log_info "Extracting subdomains from chaos output"
-    if ! grep -Eo '([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})' "$output_file" | sort -u | anew "$TEMP_SUBDOMAINS_FILE"; then
-        log_error "Failed to extract domains from chaos output."
-        echo -e "${RED}[✗] Failed to extract domains from chaos output${NC}"
-        exit 1
-    else
-        echo -e "${GREEN}[✓] Domains extracted successfully${NC}"
+        log_info "Subdomains from chaos added to '$TEMP_SUBDOMAINS_FILE'."
+        log_info "Full chaos output logged to: $tool_log"
+        echo -e "${GREEN}[✓] Domains from chaos extracted successfully${NC}"
     fi
 }
 
 # Run shuffledns to find subdomains
 run_shuffledns() {
-    local scope_file="$1"
+    local domain_list_file="$1"
     local wordlist="$2"
     local resolvers="$3"
     local output_file="$OUTPUT_DIR/shuffledns_output.txt"
-    
-    show_progress "Running shuffledns on" "$scope_file"
-    log_info "Running shuffledns on scope file: $scope_file with wordlist: $wordlist and resolvers: $resolvers"
-    
-    # Make sure output directory exists
-    mkdir -p "$(dirname "$output_file")"
-    
-    # Touch the output file to ensure it exists
-    touch "$output_file"
-    
-    # Check if wordlist exists
+    local tool_log="$OUTPUT_DIR/logging/shuffledns-$(date +%Y%m%d%H%M%S).log"
+
+    show_progress "Running shuffledns on" "$domain_list_file"
+    log_info "Running shuffledns on domain list: $domain_list_file with wordlist: $wordlist"
+    log_info "Shuffledns output will be logged to: $tool_log"
+
+    # Check for required files
     if [[ ! -f "$wordlist" ]]; then
         log_error "Wordlist file not found: $wordlist"
-        echo -e "${RED}[✗] Wordlist file not found. Please ensure '$wordlist' exists${NC}"
+        echo -e "${RED}[✗] Wordlist file not found: '$wordlist'${NC}"
         return 1
     fi
-    
-    # Check if resolvers file exists
     if [[ ! -f "$resolvers" ]]; then
         log_error "Resolvers file not found: $resolvers"
-        echo -e "${RED}[✗] Resolvers file not found. Please ensure '$resolvers' exists${NC}"
+        echo -e "${RED}[✗] Resolvers file not found: '$resolvers'${NC}"
         return 1
     fi
+
+    # Clear previous output and log files
+    > "$output_file"
+    > "$tool_log"
+
+    # Run shuffledns for each domain individually using -d flag
+    local domain_count=0
+    local success_count=0
     
-    # Run shuffledns with proper error handling
-    if ! for domain in $(cat "$scope_file"); do shuffledns -d "$domain" -nc -r "$resolvers" -mode bruteforce -w "$wordlist" >> "$output_file";done; then
-        log_error "shuffledns command failed or returned warnings."
-        echo -e "${RED}[✗] shuffledns command failed or returned warnings${NC}"
-        return 1
-    else
+    while read -r domain; do
+        if [[ -n "$domain" ]]; then
+            domain_count=$((domain_count + 1))
+            log_info "Running shuffledns for domain: $domain"
+            echo "=== Running shuffledns for domain: $domain ===" >> "$tool_log"
+            
+            # Run shuffledns with -d for individual domain
+            if shuffledns -d "$domain" -nc -r "$resolvers" -mode bruteforce -w "$wordlist" 2>&1 | tee -a "$tool_log" >> "$output_file"; then
+                success_count=$((success_count + 1))
+                log_info "Shuffledns completed successfully for domain: $domain"
+            else
+                log_error "Shuffledns failed for domain: $domain"
+                echo "Failed to run shuffledns for domain: $domain" >> "$tool_log"
+            fi
+        fi
+    done < "$domain_list_file"
+
+    if [[ $success_count -gt 0 ]]; then
         show_success "shuffledns"
-        log_info "Subdomains found and saved to '$output_file'."
+        log_info "Shuffledns completed for $success_count out of $domain_count domains."
+        log_info "Shuffledns results saved to '$output_file'."
+        log_info "Full shuffledns output logged to: $tool_log"
+        echo -e "${GREEN}[✓] Shuffledns completed for $success_count out of $domain_count domains.${NC}"
+    else
+        log_error "Shuffledns failed for all domains or no domains processed."
+        echo -e "${YELLOW}[!] Shuffledns finished with no successful results.${NC}"
     fi
-    
+
     # Extract subdomains from shuffledns output
-    log_info "Extracting subdomains from shuffledns output"
     if [[ -s "$output_file" ]]; then
-        if ! grep -Eo '([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})' "$output_file" | sort -u | anew "$TEMP_SUBDOMAINS_FILE"; then
-            log_error "Failed to extract domains from shuffledns output."
-            echo -e "${RED}[✗] Failed to extract domains from shuffledns output${NC}"
-            return 1
+        log_info "Extracting subdomains from shuffledns output"
+        if ! cat "$output_file" | anew "$TEMP_SUBDOMAINS_FILE"; then
+            log_error "Failed to add domains from shuffledns output to temp file."
+            echo -e "${RED}[✗] Failed to add domains from shuffledns output.${NC}"
         else
-            echo -e "${GREEN}[✓] Domains extracted successfully${NC}"
+            echo -e "${GREEN}[✓] Domains from shuffledns extracted successfully.${NC}"
         fi
     else
-        log_error "shuffledns output file is empty: $output_file"
-        echo -e "${YELLOW}[!] No subdomains found by shuffledns${NC}"
+        log_info "shuffledns output file is empty. No new subdomains found."
+        echo -e "${YELLOW}[!] No subdomains were found by shuffledns.${NC}"
     fi
 }
 
@@ -460,48 +460,82 @@ run_shuffledns() {
 run_crtsh() {
     local scope_file="$1"
     local output_file="$OUTPUT_DIR/crtsh_output.txt"
+    local tool_log="$OUTPUT_DIR/logging/crtsh-$(date +%Y%m%d%H%M%S).log"
     show_progress "Running crtsh on" "$scope_file"
-    log_info "Running crtsh on scope file: $scope_file"
+    log_info "Querying crt.sh for domains in: $scope_file"
+    log_info "crt.sh output will be logged to: $tool_log"
     
-    # Make sure output directory exists
-    mkdir -p "$(dirname "$output_file")"
-    
-    # Touch the output file to ensure it exists
-    touch "$output_file"
-    
-    if ! curl -s "https://crt.sh/?q=$(cat "$scope_file" | tr '\n' '+')&output=json" | jq -r '.[].name_value' | sort -u > "$output_file"; then
-        log_error "crtsh command failed or returned warnings."
-        echo -e "${RED}[✗] crtsh command failed or returned warnings${NC}"
+    # Clear previous results
+    > "$output_file"
+    > "$tool_log"
+
+    # Loop through each domain to avoid creating a URL that is too long
+    while read -r domain; do
+        if [[ -n "$domain" ]]; then
+            log_info "Querying crt.sh for: $domain"
+            echo "=== Querying crt.sh for: $domain ===" >> "$tool_log"
+            
+            # Create temporary file for this domain's response
+            local temp_response="$TEMP_DIR/crtsh_response_${domain//[^a-zA-Z0-9]/_}.json"
+            
+            # Query crt.sh and save raw response
+            if curl -s "https://crt.sh/?q=%25.$domain&output=json" > "$temp_response" 2>>"$tool_log"; then
+                # Check if response is valid JSON and not empty
+                if [[ -s "$temp_response" ]] && jq empty "$temp_response" 2>/dev/null; then
+                    # Valid JSON response - extract domain names
+                    if jq -r '.[].name_value' "$temp_response" 2>/dev/null | sed 's/\*\.//g' | grep -v '^$' | sort -u >> "$output_file"; then
+                        log_info "Successfully processed crt.sh response for: $domain"
+                        echo "Successfully processed crt.sh response for: $domain" >> "$tool_log"
+                    else
+                        log_info "crt.sh returned valid JSON but no extractable domains for: $domain"
+                        echo "crt.sh returned valid JSON but no extractable domains for: $domain" >> "$tool_log"
+                    fi
+                else
+                    # Invalid or empty JSON response
+                    local response_size=$(wc -c < "$temp_response" 2>/dev/null || echo "0")
+                    if [[ "$response_size" -eq 0 ]]; then
+                        log_info "crt.sh returned empty response for: $domain"
+                        echo "crt.sh returned empty response for: $domain" >> "$tool_log"
+                    else
+                        log_info "crt.sh returned invalid JSON for: $domain (size: $response_size bytes)"
+                        echo "crt.sh returned invalid JSON for: $domain (size: $response_size bytes)" >> "$tool_log"
+                        echo "Raw response:" >> "$tool_log"
+                        head -3 "$temp_response" >> "$tool_log" 2>/dev/null || true
+                    fi
+                fi
+                
+                # Log the raw response for debugging
+                cat "$temp_response" >> "$tool_log" 2>/dev/null || true
+                echo "" >> "$tool_log"
+            else
+                log_error "Failed to query crt.sh for: $domain (curl failed)"
+                echo "Failed to query crt.sh for: $domain (curl failed)" >> "$tool_log"
+            fi
+            
+            # Clean up temporary response file
+            rm -f "$temp_response"
+        fi
+    done < "$scope_file"
+
+    # Check if any domains were found
+    if [[ ! -s "$output_file" ]]; then
+        log_info "crt.sh returned no results."
+        echo -e "${YELLOW}[!] crt.sh returned no subdomains.${NC}"
     else
         show_success "crtsh"
-        log_info "Subdomains found and saved to '$output_file'."
+        local domain_count=$(wc -l < "$output_file")
+        log_info "crt.sh found $domain_count subdomains, saved to '$output_file'."
+        log_info "Full crt.sh output logged to: $tool_log"
+        echo -e "${GREEN}[✓] crt.sh found $domain_count subdomains${NC}"
         
-        # Display the found subdomains if any
-        if [[ -s "$output_file" ]]; then
-            local subdomain_count=$(wc -l < "$output_file")
-            echo -e "${BLUE}[*] Found $subdomain_count subdomains from certificate transparency:${NC}"
-            cat "$output_file" | while read -r subdomain; do
-                echo -e "${GREEN} - $subdomain${NC}"
-            done
-            log_info "Certificate transparency returned $subdomain_count subdomains"
-        else
-            echo -e "${YELLOW}[!] No subdomains found in certificate transparency logs${NC}"
-            log_info "No subdomains found in certificate transparency logs"
-        fi
-    fi
-    
-    # Extract subdomains from crtsh output
-    log_info "Extracting subdomains from crtsh output"
-    if [[ -s "$output_file" ]]; then
-        if ! grep -Eo '([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})' "$output_file" | sort -u | anew "$TEMP_SUBDOMAINS_FILE"; then
-            log_error "Failed to extract domains from crtsh output."
+        # Add results to the main temporary subdomain file
+        log_info "Extracting subdomains from crt.sh output"
+        if ! cat "$output_file" | anew "$TEMP_SUBDOMAINS_FILE"; then
+            log_error "Failed to add domains from crtsh output."
             echo -e "${RED}[✗] Failed to extract domains from crtsh output${NC}"
-            exit 1
         else
-            echo -e "${GREEN}[✓] Domains extracted successfully${NC}"
+            echo -e "${GREEN}[✓] Domains from crt.sh extracted successfully.${NC}"
         fi
-    else
-        echo -e "${YELLOW}[!] No domains to extract from crtsh output${NC}"
     fi
 }
 
@@ -544,23 +578,94 @@ process_custom_subdomains() {
 resolve_subdomains() {
     local input_file="$1"
     local output_file="$RESOLVED_DOMAINS_FILE"
+    local tool_log="$OUTPUT_DIR/logging/dnsx-resolve-$(date +%Y%m%d%H%M%S).log"
     log_info "Resolving subdomains from $input_file"
-    if ! dnsx -l "$input_file" -nc -o "$output_file" -a -cname -resp -silent; then
+    log_info "DNSX resolution output will be logged to: $tool_log"
+    
+    if ! dnsx -l "$input_file" -nc -o "$output_file" -a -cname -resp -silent 2>&1 | tee "$tool_log"; then
         log_error "dnsx command failed or returned warnings."
         echo -e "${RED}[✗] dnsx command failed or returned warnings${NC}"
     else
         show_success "dnsx"
         log_info "Subdomains resolved and saved to '$output_file'."
+        log_info "Full dnsx resolution output logged to: $tool_log"
     fi
 
     # Generate final list of resolved domains with ip addresses
     log_info "Generating final list of resolved domains with IP addresses"
-    if ! awk '{print $1" "$3}' "$output_file" | tr -d '[]' | sort -u | anew "$IN_SCOPE_FILE"; then
+    
+    # Debug: Show first few lines of DNSX output to understand format
+    log_info "DNSX output format (first 5 lines):"
+    head -5 "$output_file" >> "$LOG_FILE" 2>/dev/null || true
+    
+    # Parse DNSX output with multiple fallback methods
+    # Method 1: Try the strict [A] record parsing
+    awk '
+        {
+            hostname = $1
+            # Look for A record IP addresses (fields with format [A] IP)
+            for (i=2; i<=NF; i++) {
+                if ($i == "[A]" && i+1 <= NF) {
+                    ip = $(i+1)
+                    # Ensure IP is actually an IP address (basic validation)
+                    if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {
+                        print hostname " " ip
+                    }
+                }
+            }
+        }
+    ' "$output_file" > "$TEMP_DIR/parsed_method1.txt"
+    
+    # Method 2: Fallback to original parsing if method 1 produces no results
+    if [[ ! -s "$TEMP_DIR/parsed_method1.txt" ]]; then
+        log_info "Method 1 (strict [A] parsing) produced no results, trying fallback method"
+        awk '{print $1" "$3}' "$output_file" | tr -d '[]' | grep -E '^[a-zA-Z0-9.-]+ [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' > "$TEMP_DIR/parsed_method2.txt"
+        
+        # Method 3: Even more permissive parsing
+        if [[ ! -s "$TEMP_DIR/parsed_method2.txt" ]]; then
+            log_info "Method 2 (fallback) also produced no results, trying permissive method"
+            # Extract lines that contain both a hostname and an IP address
+            grep -E '^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}.*[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$output_file" | \
+            awk '
+                {
+                    hostname = $1
+                    # Find the first IP address in the line
+                    for (i=2; i<=NF; i++) {
+                        if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {
+                            print hostname " " $i
+                            break
+                        }
+                    }
+                }
+            ' > "$TEMP_DIR/parsed_method3.txt"
+            
+            if [[ -s "$TEMP_DIR/parsed_method3.txt" ]]; then
+                cp "$TEMP_DIR/parsed_method3.txt" "$TEMP_DIR/final_parsed.txt"
+                log_info "Using method 3 (permissive parsing) results"
+            else
+                log_error "All parsing methods failed to extract hostname-IP pairs"
+                echo -e "${RED}[✗] Failed to parse any hostname-IP pairs from DNSX output${NC}"
+                # Create empty file to prevent script failure
+                touch "$TEMP_DIR/final_parsed.txt"
+            fi
+        else
+            cp "$TEMP_DIR/parsed_method2.txt" "$TEMP_DIR/final_parsed.txt"
+            log_info "Using method 2 (fallback parsing) results"
+        fi
+    else
+        cp "$TEMP_DIR/parsed_method1.txt" "$TEMP_DIR/final_parsed.txt"
+        log_info "Using method 1 (strict [A] parsing) results"
+    fi
+    
+    # Apply final processing
+    if ! cat "$TEMP_DIR/final_parsed.txt" | sort -u | anew "$IN_SCOPE_FILE"; then
         log_error "Failed to generate final list of resolved domains."
         echo -e "${RED}[✗] Failed to generate final list of resolved domains${NC}"
         exit 1
     else
-        echo -e "${GREEN}[✓] Final list of resolved domains generated successfully${NC}"
+        local resolved_count=$(wc -l < "$IN_SCOPE_FILE" 2>/dev/null || echo "0")
+        echo -e "${GREEN}[✓] Final list of resolved domains generated successfully ($resolved_count entries)${NC}"
+        log_info "Generated $resolved_count resolved domain entries in $IN_SCOPE_FILE"
     fi
 }
 
@@ -746,10 +851,37 @@ main() {
     run_dnsx "$EXPANDED_IPS_FILE"
     extract_apex_domains "$TEMP_DOMAINS_FILE" "$APEX_DOMAINS"
     review_apex_domains "$APEX_DOMAINS"
-    run_subfinder "$APEX_DOMAINS"
-    run_chaos "$APEX_DOMAINS"
-    run_crtsh "$APEX_DOMAINS"
-    run_shuffledns "$APEX_DOMAINS" "$wordlist" "$resolvers"
+    
+    # --- Start of Parallel Execution ---
+    log_info "Starting parallel subdomain enumeration..."
+    echo -e "${BLUE}[*] Starting parallel subdomain enumeration...${NC}"
+
+    run_subfinder "$APEX_DOMAINS" &
+    local subfinder_pid=$!
+
+    run_chaos "$APEX_DOMAINS" &
+    local chaos_pid=$!
+
+    run_crtsh "$APEX_DOMAINS" &
+    local crtsh_pid=$!
+
+    run_shuffledns "$APEX_DOMAINS" "$wordlist" "$resolvers" &
+    local shuffledns_pid=$!
+
+    # Wait for all background jobs to finish
+    wait $subfinder_pid
+    log_info "Subfinder has completed."
+    wait $chaos_pid
+    log_info "Chaos has completed."
+    wait $crtsh_pid
+    log_info "crt.sh has completed."
+    wait $shuffledns_pid
+    log_info "Shuffledns has completed."
+
+    echo -e "${GREEN}[✓] All enumeration tasks are complete.${NC}"
+    log_info "All parallel enumeration tasks have finished."
+    # --- End of Parallel Execution ---
+
     process_custom_subdomains "$custom_subdomains_file"
     resolve_subdomains "$TEMP_SUBDOMAINS_FILE"
     check_subdomains_in_scope "$IN_SCOPE_FILE" "$EXPANDED_IPS_FILE" "$scope_file"
@@ -766,8 +898,30 @@ main() {
     echo -e "${YELLOW}[!] Recommended tools for URL discovery:${NC}"
     echo -e "${GREEN}   • gau: cat ${FINAL_SCOPE_FILE} | cut -d' ' -f1 | gau${NC}"
     echo -e "${GREEN}   • waybackurls: cat ${FINAL_SCOPE_FILE} | cut -d' ' -f1 | waybackurls${NC}"
-    echo -e "${GREEN}   • gauplus: cat ${FINAL_SCOPE_FILE} | cut -d' ' -f1 | gauplus${NC}"
     echo -e "${GREEN}   • katana: cat ${FINAL_SCOPE_FILE} | cut -d' ' -f1 | katana${NC}"
+    
+    # Display log file summary
+    echo -e "${BLUE}[*] === DETAILED LOGS AVAILABLE ===${NC}"
+    echo -e "${YELLOW}[!] Full tool output has been logged to the following files:${NC}"
+    if ls "$OUTPUT_DIR"/logging/tlsx-*.log >/dev/null 2>&1; then
+        echo -e "${GREEN}   • TLSX logs: $OUTPUT_DIR/logging/tlsx-*.log${NC}"
+    fi
+    if ls "$OUTPUT_DIR"/logging/dnsx-*.log >/dev/null 2>&1; then
+        echo -e "${GREEN}   • DNSX logs: $OUTPUT_DIR/logging/dnsx-*.log${NC}"
+    fi
+    if ls "$OUTPUT_DIR"/logging/subfinder-*.log >/dev/null 2>&1; then
+        echo -e "${GREEN}   • Subfinder logs: $OUTPUT_DIR/logging/subfinder-*.log${NC}"
+    fi
+    if ls "$OUTPUT_DIR"/logging/chaos-*.log >/dev/null 2>&1; then
+        echo -e "${GREEN}   • Chaos logs: $OUTPUT_DIR/logging/chaos-*.log${NC}"
+    fi
+    if ls "$OUTPUT_DIR"/logging/crtsh-*.log >/dev/null 2>&1; then
+        echo -e "${GREEN}   • crt.sh logs: $OUTPUT_DIR/logging/crtsh-*.log${NC}"
+    fi
+    if ls "$OUTPUT_DIR"/logging/shuffledns-*.log >/dev/null 2>&1; then
+        echo -e "${GREEN}   • Shuffledns logs: $OUTPUT_DIR/logging/shuffledns-*.log${NC}"
+    fi
+    echo -e "${BLUE}   • Main script log: ${LOG_FILE}${NC}"
     
     # Final cleanup
     log_info "Hunter script completed successfully."
